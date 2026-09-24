@@ -1,0 +1,9 @@
+<manifest xmlns:android="http://schemas.android.com/apk/res/android">
+ <uses-permission android:name="android.permission.INTERNET"/>
+ <application android:theme="@style/Theme.Flowesal" android:label="Flowesal" android:allowBackup="false" android:supportsRtl="true">
+  <activity android:name=".MainActivity" android:exported="true"><intent-filter><action android:name="android.intent.action.MAIN"/><category android:name="android.intent.category.LAUNCHER"/></intent-filter></activity>
+  <service android:name=".FlowesalVpnService" android:permission="android.permission.BIND_VPN_SERVICE" android:exported="false">
+   <intent-filter><action android:name="android.net.VpnService"/></intent-filter>
+  </service>
+ </application>
+</manifest>
