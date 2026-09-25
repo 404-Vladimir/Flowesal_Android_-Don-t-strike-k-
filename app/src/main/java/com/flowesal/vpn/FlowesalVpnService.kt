@@ -8,7 +8,6 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
-import com.flowesal.vpn.MainActivity
 import hev.htproxy.TProxyService
 import io.github.oviron.libbyedpi.ByeDpi
 import io.github.oviron.libbyedpi.ByeDpiConfig
@@ -16,6 +15,7 @@ import kotlinx.coroutines.CoroutineScope
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
+import kotlinx.coroutines.runBlocking
 import kotlinx.coroutines.launch
 import java.io.File
 
@@ -31,11 +31,6 @@ class FlowesalVpnService : VpnService() {
     private var profile = "General"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
-    /*
-     * Rootless userspace DPI profiles.
-     * These are ByeDPI command-line arguments; the traffic path is:
-     * Android apps -> VpnService/TUN -> hev-socks5-tunnel -> ByeDPI -> Internet.
-     */
     private val profiles = mapOf(
         "General" to listOf("--auto=torst"),
         "Alt 1" to listOf("--split", "1", "--auto=torst"),
@@ -53,10 +48,7 @@ class FlowesalVpnService : VpnService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         profile = intent?.getStringExtra("profile") ?: "General"
         startForegroundNotification()
-
-        if (!running) {
-            scope.launch { startEngine() }
-        }
+        if (!running) scope.launch { startEngine() }
         return START_STICKY
     }
 
@@ -67,7 +59,7 @@ class FlowesalVpnService : VpnService() {
             val args = mutableListOf("-i", "127.0.0.1", "-p", PROXY_PORT.toString())
             args += profiles[profile] ?: profiles.getValue("General")
 
-            // Start the local DPI-bypass SOCKS5 listener first.
+            // Local ByeDPI SOCKS5 listener.
             ByeDpi.start(ByeDpiConfig(args))
 
             val builder = Builder()
@@ -76,6 +68,7 @@ class FlowesalVpnService : VpnService() {
                 .addAddress("10.10.10.10", 32)
                 .addRoute("0.0.0.0", 0)
                 .addDnsServer("1.1.1.1")
+                // The proxy/tunnel sockets must stay outside the VPN to avoid a loop.
                 .addDisallowedApplication(packageName)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -99,8 +92,7 @@ class FlowesalVpnService : VpnService() {
                 """.trimIndent()
             )
 
-            val started = TProxyService.TProxyStartService(config.absolutePath, fd.fd)
-            if (!started) {
+            if (!TProxyService.TProxyStartService(config.absolutePath, fd.fd)) {
                 fd.close()
                 iface = null
                 ByeDpi.stop()
@@ -121,12 +113,13 @@ class FlowesalVpnService : VpnService() {
     }
 
     private fun stopEngine() {
-        if (!running && iface == null) return
-        running = false
-        runCatching { TProxyService.TProxyStopService() }
-        runCatching { ByeDpi.stop() }
-        iface?.close()
-        iface = null
+        runBlocking(Dispatchers.IO) {
+            running = false
+            runCatching { TProxyService.TProxyStopService() }
+            runCatching { ByeDpi.stop() }
+            iface?.close()
+            iface = null
+        }
         stopForeground(STOP_FOREGROUND_REMOVE)
     }
 
