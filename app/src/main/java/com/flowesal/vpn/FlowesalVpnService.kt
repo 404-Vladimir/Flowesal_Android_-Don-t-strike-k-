@@ -8,14 +8,17 @@ import java.io.FileOutputStream
 import java.net.DatagramPacket
 import java.net.DatagramSocket
 import java.net.InetAddress
-import java.nio.ByteBuffer
-import java.nio.ByteOrder
 import kotlin.concurrent.thread
 
 class FlowesalVpnService : VpnService() {
+
     private var iface: ParcelFileDescriptor? = null
-    @Volatile private var running = false
+
+    @Volatile
+    private var running = false
+
     private var profile = "General"
+
     private val profiles = mapOf(
         "General" to setOf("example-blocked.invalid"),
         "Alt 1" to setOf("example-blocked.invalid"),
@@ -24,85 +27,391 @@ class FlowesalVpnService : VpnService() {
         "Alt 4" to setOf("example-blocked.invalid")
     )
 
-    override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
+    override fun onStartCommand(
+        intent: Intent?,
+        flags: Int,
+        startId: Int
+    ): Int {
         profile = intent?.getStringExtra("profile") ?: "General"
-        if (!running) startVpn()
+
+        if (!running) {
+            startVpn()
+        }
+
         return START_STICKY
     }
 
     private fun startVpn() {
-        val b = Builder().setSession("Flowesal").setMtu(1500)
+        val builder = Builder()
+            .setSession("Flowesal")
+            .setMtu(1500)
             .addAddress("10.10.0.2", 32)
             .addDnsServer("10.10.0.1")
             .addRoute("10.10.0.1", 32)
-        iface = b.establish()
+
+        iface = builder.establish()
+
+        if (iface == null) {
+            stopSelf()
+            return
+        }
+
         running = true
-        thread(name = "flowesal-dns") { loop() }
+
+        thread(name = "flowesal-dns") {
+            loop()
+        }
     }
 
     private fun loop() {
         val pfd = iface ?: return
+
         FileInputStream(pfd.fileDescriptor).use { input ->
             FileOutputStream(pfd.fileDescriptor).use { output ->
-                val buf = ByteArray(32767)
+
+                val buffer = ByteArray(32767)
+
                 while (running) {
-                    val n = input.read(buf)
-                    if (n <= 0) continue
-                    handlePacket(buf, n, output)
+                    val length = input.read(buffer)
+
+                    if (length <= 0) {
+                        continue
+                    }
+
+                    handlePacket(buffer, length, output)
                 }
             }
         }
     }
 
-    private fun handlePacket(packet: ByteArray, len: Int, out: FileOutputStream) {
-        if (len < 28) return
-        val version = (packet[0].toInt() ushr 4) and 0xF
-        val ihl = (packet[0].toInt() and 0xF) * 4
-        if (version != 4 || ihl < 20 || packet[9].toInt() and 0xFF != 17) return
+    private fun handlePacket(
+        packet: ByteArray,
+        len: Int,
+        out: FileOutputStream
+    ) {
+        if (len < 28) {
+            return
+        }
+
+        val version =
+            (packet[0].toInt() ushr 4) and 0x0F
+
+        val ihl =
+            (packet[0].toInt() and 0x0F) * 4
+
+        if (version != 4 || ihl < 20 || len < ihl + 8) {
+            return
+        }
+
+        val protocol =
+            packet[9].toInt() and 0xFF
+
+        if (protocol != 17) {
+            return
+        }
+
         val udp = ihl
+
         val srcPort = u16(packet, udp)
         val dstPort = u16(packet, udp + 2)
-        if (dstPort != 53) return
-        val dns = packet.copyOfRange(udp + 8, len)
+
+        if (dstPort != 53) {
+            return
+        }
+
+        val dnsStart = udp + 8
+
+        if (dnsStart >= len) {
+            return
+        }
+
+        val dns =
+            packet.copyOfRange(dnsStart, len)
+
         val name = readDnsName(dns) ?: return
-        val blocked = profiles[profile].orEmpty().any { name == it || name.endsWith("." + it) }
-        val response = if (blocked) buildBlockedDns(dns) else forwardDns(dns)
-        if (response != null) {
-            val reply = packet.copyOf(ihl + 8 + response.size)
-            // swap IPs
-            for (i in 0 until 4) { reply[12+i] = packet[16+i]; reply[16+i] = packet[12+i] }
-            reply[8] = 64
-            // swap UDP ports
-            put16(reply, udp, dstPort); put16(reply, udp + 2, srcPort)
-            put16(reply, udp + 4, 8 + response.size)
-            System.arraycopy(response, 0, reply, udp + 8, response.size)
-            put16(reply, 10, 0); put16(reply, 10, checksum(reply, 0, ihl))
-            put16(reply, udp + 6, 0); put16(reply, udp + 6, udpChecksum(reply, udp, 8 + response.size))
-            out.write(reply)
+
+        val blocked =
+            profiles[profile]
+                .orEmpty()
+                .any {
+                    name == it || name.endsWith(".$it")
+                }
+
+        val response =
+            if (blocked) {
+                buildBlockedDns(dns)
+            } else {
+                forwardDns(dns)
+            }
+
+        if (response == null) {
+            return
+        }
+
+        val reply =
+            packet.copyOf(ihl + 8 + response.size)
+
+        // Swap IPv4 addresses.
+        for (i in 0 until 4) {
+            reply[12 + i] = packet[16 + i]
+            reply[16 + i] = packet[12 + i]
+        }
+
+        reply[8] = 64
+
+        // Swap UDP ports.
+        put16(reply, udp, dstPort)
+        put16(reply, udp + 2, srcPort)
+
+        put16(
+            reply,
+            udp + 4,
+            8 + response.size
+        )
+
+        System.arraycopy(
+            response,
+            0,
+            reply,
+            udp + 8,
+            response.size
+        )
+
+        // IPv4 checksum.
+        put16(reply, 10, 0)
+
+        put16(
+            reply,
+            10,
+            checksum(reply, 0, ihl)
+        )
+
+        // UDP checksum.
+        put16(reply, udp + 6, 0)
+
+        put16(
+            reply,
+            udp + 6,
+            udpChecksum(
+                reply,
+                udp,
+                8 + response.size
+            )
+        )
+
+        out.write(reply)
+    }
+
+    private fun forwardDns(q: ByteArray): ByteArray? {
+        return try {
+            DatagramSocket().use { socket ->
+
+                if (!protect(socket)) {
+                    return null
+                }
+
+                socket.soTimeout = 2500
+
+                val address =
+                    InetAddress.getByName("1.1.1.1")
+
+                socket.send(
+                    DatagramPacket(
+                        q,
+                        q.size,
+                        address,
+                        53
+                    )
+                )
+
+                val buffer = ByteArray(4096)
+
+                val packet =
+                    DatagramPacket(
+                        buffer,
+                        buffer.size
+                    )
+
+                socket.receive(packet)
+
+                packet.data.copyOf(packet.length)
+            }
+        } catch (_: Exception) {
+            null
         }
     }
 
-    private fun forwardDns(q: ByteArray): ByteArray? = try {
-        val socket = DatagramSocket(); protect(socket)
-        socket.soTimeout = 2500
-        val addr = InetAddress.getByName("1.1.1.1")
-        socket.send(DatagramPacket(q, q.size, addr, 53))
-        val b = ByteArray(4096); val p = DatagramPacket(b, b.size); socket.receive(p); socket.close(); p.data.copyOf(p.length)
-    } catch (_: Exception) { null }
+    private fun buildBlockedDns(
+        q: ByteArray
+    ): ByteArray {
+        val response = q.copyOf()
 
-    private fun buildBlockedDns(q: ByteArray): ByteArray {
-        val r = q.copyOf(); r[2] = (r[2].toInt() or 0x80).toByte(); r[3] = (r[3].toInt() or 0x83).toByte()
-        r[6] = 0; r[7] = 0; r[8] = 0; r[9] = 0; return r
+        response[2] =
+            (response[2].toInt() or 0x80).toByte()
+
+        response[3] =
+            (response[3].toInt() or 0x83).toByte()
+
+        response[6] = 0
+        response[7] = 0
+        response[8] = 0
+        response[9] = 0
+
+        return response
     }
 
-    private fun readDnsName(d: ByteArray): String? {
-        if (d.size < 13) return null; var i = 12; val parts = mutableListOf<String>()
-        while (i < d.size) { val n = d[i].toInt() and 255; i++; if (n == 0) break; if (n > 63 || i+n > d.size) return null; parts += String(d, i, n, Charsets.US_ASCII); i += n }
-        return parts.joinToString(".").lowercase()
+    private fun readDnsName(
+        data: ByteArray
+    ): String? {
+
+        if (data.size < 13) {
+            return null
+        }
+
+        var index = 12
+
+        val parts = mutableListOf<String>()
+
+        while (index < data.size) {
+
+            val length =
+                data[index].toInt() and 0xFF
+
+            index++
+
+            if (length == 0) {
+                break
+            }
+
+            if (
+                length > 63 ||
+                index + length > data.size
+            ) {
+                return null
+            }
+
+            parts += String(
+                data,
+                index,
+                length,
+                Charsets.US_ASCII
+            )
+
+            index += length
+        }
+
+        return parts
+            .joinToString(".")
+            .lowercase()
     }
-    private fun u16(a: ByteArray, p: Int) = ((a[p].toInt() and 255) shl 8) or (a[p+1].toInt() and 255)
-    private fun put16(a: ByteArray, p: Int, v: Int) { a[p]=(v ushr 8).toByte(); a[p+1]=v.toByte() }
-    private fun checksum(a: ByteArray, off: Int, len: Int): Int { var s=0; var i=off; while(i<off+len){s+=(a[i].toInt()and255)shl8 or(if(i+1<off+len)a[i+1].toInt()and255 else 0); while(s ushr 16 !=0)s=(s and 65535)+(s ushr 16); i+=2}; return s.inv() and 65535 }
-    private fun udpChecksum(a: ByteArray, udp: Int, len: Int): Int { var s=0; for(i in 12..19 step 2)s+=u16(a,i); s+=17; s+=len; var i=udp; while(i<udp+len){s+=u16(a,i);i+=2}; while(s ushr 16 !=0)s=(s and 65535)+(s ushr 16); return s.inv() and 65535 }
-    override fun onDestroy(){running=false; iface?.close(); iface=null; super.onDestroy()}
+
+    private fun u16(
+        data: ByteArray,
+        position: Int
+    ): Int {
+        return (
+            ((data[position].toInt() and 0xFF) shl 8) or
+                (data[position + 1].toInt() and 0xFF)
+            )
+    }
+
+    private fun put16(
+        data: ByteArray,
+        position: Int,
+        value: Int
+    ) {
+        data[position] =
+            (value ushr 8).toByte()
+
+        data[position + 1] =
+            value.toByte()
+    }
+
+    private fun checksum(
+        data: ByteArray,
+        offset: Int,
+        length: Int
+    ): Int {
+
+        var sum = 0
+        var index = offset
+
+        while (index < offset + length) {
+
+            val high =
+                (data[index].toInt() and 0xFF) shl 8
+
+            val low =
+                if (index + 1 < offset + length) {
+                    data[index + 1].toInt() and 0xFF
+                } else {
+                    0
+                }
+
+            sum += high or low
+
+            while ((sum ushr 16) != 0) {
+                sum =
+                    (sum and 0xFFFF) +
+                        (sum ushr 16)
+            }
+
+            index += 2
+        }
+
+        return sum.inv() and 0xFFFF
+    }
+
+    private fun udpChecksum(
+        data: ByteArray,
+        udpOffset: Int,
+        length: Int
+    ): Int {
+
+        var sum = 0
+
+        // IPv4 pseudo-header.
+        for (i in 12..19 step 2) {
+            sum += u16(data, i)
+        }
+
+        sum += 17
+        sum += length
+
+        var index = udpOffset
+
+        while (index < udpOffset + length) {
+
+            val high =
+                (data[index].toInt() and 0xFF) shl 8
+
+            val low =
+                if (index + 1 < udpOffset + length) {
+                    data[index + 1].toInt() and 0xFF
+                } else {
+                    0
+                }
+
+            sum += high or low
+
+            index += 2
+        }
+
+        while ((sum ushr 16) != 0) {
+            sum =
+                (sum and 0xFFFF) +
+                    (sum ushr 16)
+        }
+
+        return sum.inv() and 0xFFFF
+    }
+
+    override fun onDestroy() {
+        running = false
+
+        iface?.close()
+        iface = null
+
+        super.onDestroy()
+    }
 }
