@@ -1,14 +1,13 @@
 package com.flowesal.vpn
 
+import android.app.Notification
 import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
 import android.net.VpnService
 import android.os.Build
-import android.os.IBinder
 import android.os.ParcelFileDescriptor
-import androidx.core.app.NotificationCompat
 import java.io.FileInputStream
 import java.io.FileOutputStream
 import java.net.DatagramPacket
@@ -30,8 +29,8 @@ class FlowesalVpnService : VpnService() {
 
     private var profile = "General"
 
-    // These are deliberately placeholders until the real Flowesal/Zapret
-    // strategy engine is integrated. The current engine is a DNS filter.
+    // Placeholder profiles. The current engine is DNS filtering only.
+    // The real Flowesal/Zapret DPI strategy engine is not yet integrated.
     private val profiles = mapOf(
         "General" to setOf("example-blocked.invalid"),
         "Alt 1" to setOf("example-blocked.invalid"),
@@ -76,13 +75,20 @@ class FlowesalVpnService : VpnService() {
             PendingIntent.FLAG_UPDATE_CURRENT or PendingIntent.FLAG_IMMUTABLE
         )
 
-        val notification = NotificationCompat.Builder(this, CHANNEL_ID)
+        val builder = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.O) {
+            Notification.Builder(this, CHANNEL_ID)
+        } else {
+            @Suppress("DEPRECATION")
+            Notification.Builder(this)
+        }
+
+        val notification = builder
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setContentTitle("Flowesal работает")
             .setContentText("Профиль: $profile")
             .setOngoing(true)
             .setContentIntent(openIntent)
-            .setCategory(NotificationCompat.CATEGORY_SERVICE)
+            .setCategory(Notification.CATEGORY_SERVICE)
             .build()
 
         startForeground(NOTIFICATION_ID, notification)
@@ -191,7 +197,6 @@ class FlowesalVpnService : VpnService() {
 
                 socket.soTimeout = 2500
                 val address = InetAddress.getByName("1.1.1.1")
-
                 socket.send(DatagramPacket(q, q.size, address, 53))
 
                 val buffer = ByteArray(4096)
@@ -314,9 +319,5 @@ class FlowesalVpnService : VpnService() {
         iface?.close()
         iface = null
         stopForeground(STOP_FOREGROUND_REMOVE)
-    }
-
-    override fun onBind(intent: Intent?): IBinder? {
-        return super.onBind(intent)
     }
 }
