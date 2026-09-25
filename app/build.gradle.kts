@@ -5,8 +5,9 @@ plugins {
 
 val byedpiVersion = "0.1.0"
 val hevVersion = "2.17.1"
+
 val byedpiAar = layout.buildDirectory.file("libs/libbyedpi-android-v$byedpiVersion.aar")
-val hevAar = layout.buildDirectory.file("libs/hev-socks5-tunnel.aar")
+val hevJniDir = layout.buildDirectory.dir("generated/hev-jniLibs")
 
 fun downloadArtifactTask(name: String, url: String, output: Provider<RegularFile>) = tasks.register(name) {
     outputs.file(output)
@@ -25,11 +26,30 @@ val downloadByedpi = downloadArtifactTask(
     byedpiAar
 )
 
-val downloadHev = downloadArtifactTask(
-    "downloadHevSocks5Tunnel",
-    "https://github.com/heiher/hev-socks5-tunnel/releases/download/$hevVersion/hev-socks5-tunnel.aar",
-    hevAar
+val hevAssets = mapOf(
+    "arm64-v8a" to "hev-socks5-tunnel-android-arm64-v8a",
+    "armeabi-v7a" to "hev-socks5-tunnel-android-armeabi-v7a",
+    "x86" to "hev-socks5-tunnel-android-x86",
+    "x86_64" to "hev-socks5-tunnel-android-x86_64"
 )
+
+val hevOutputs = hevAssets.mapValues { (abi, _) ->
+    hevJniDir.map { it.dir(abi).file("libhev-socks5-tunnel.so") }
+}
+
+val downloadHev = tasks.register("downloadHevSocks5Tunnel") {
+    outputs.files(hevOutputs.values)
+    doLast {
+        hevAssets.forEach { (abi, assetName) ->
+            val target = hevOutputs.getValue(abi).get().asFile
+            target.parentFile.mkdirs()
+            val url = "https://github.com/heiher/hev-socks5-tunnel/releases/download/$hevVersion/$assetName"
+            target.outputStream().use { out ->
+                uri(url).toURL().openStream().use { input -> input.copyTo(out) }
+            }
+        }
+    }
+}
 
 android {
     namespace = "com.flowesal.vpn"
@@ -51,11 +71,16 @@ android {
     kotlinOptions {
         jvmTarget = "17"
     }
+
+    sourceSets {
+        getByName("main") {
+            jniLibs.srcDir(hevJniDir)
+        }
+    }
 }
 
 dependencies {
     implementation(files(byedpiAar).builtBy(downloadByedpi))
-    implementation(files(hevAar).builtBy(downloadHev))
     implementation("org.jetbrains.kotlinx:kotlinx-coroutines-android:1.10.2")
 }
 
