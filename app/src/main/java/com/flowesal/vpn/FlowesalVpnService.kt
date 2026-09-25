@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.app.PendingIntent
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
@@ -175,17 +176,24 @@ class FlowesalVpnService : VpnService() {
             Notification.Builder(this)
         }
 
-        startForeground(
-            NOTIFICATION_ID,
-            builder
-                .setSmallIcon(android.R.drawable.stat_sys_warning)
-                .setContentTitle("Flowesal")
-                .setContentText("Запуск туннеля…")
-                .setOngoing(true)
-                .setContentIntent(openIntent)
-                .setCategory(Notification.CATEGORY_SERVICE)
-                .build()
-        )
+        val notification = builder
+            .setSmallIcon(android.R.drawable.stat_sys_warning)
+            .setContentTitle("Flowesal")
+            .setContentText("Запуск туннеля…")
+            .setOngoing(true)
+            .setContentIntent(openIntent)
+            .setCategory(Notification.CATEGORY_SERVICE)
+            .build()
+
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.UPSIDE_DOWN_CAKE) {
+            startForeground(
+                NOTIFICATION_ID,
+                notification,
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_SPECIAL_USE
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
     }
 
     private fun updateNotification(text: String) {
