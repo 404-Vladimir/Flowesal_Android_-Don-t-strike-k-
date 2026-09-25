@@ -8,6 +8,7 @@ import android.content.Intent
 import android.net.VpnService
 import android.os.Build
 import android.os.ParcelFileDescriptor
+import android.util.Log
 import hev.htproxy.TProxyService
 import io.github.oviron.libbyedpi.ByeDpi
 import io.github.oviron.libbyedpi.ByeDpiConfig
@@ -21,13 +22,17 @@ import java.io.File
 
 class FlowesalVpnService : VpnService() {
     companion object {
+        private const val TAG = "FlowesalVpn"
         private const val CHANNEL_ID = "flowesal_vpn"
         private const val NOTIFICATION_ID = 1001
         private const val PROXY_PORT = 1080
+
+        @Volatile
+        var isRunning: Boolean = false
+            private set
     }
 
     private var iface: ParcelFileDescriptor? = null
-    private var running = false
     private var profile = "General"
     private val scope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
 
@@ -43,32 +48,40 @@ class FlowesalVpnService : VpnService() {
         super.onCreate()
         ByeDpi.load(applicationInfo.nativeLibraryDir)
         createNotificationChannel()
+        Log.i(TAG, "Service created")
     }
 
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         profile = intent?.getStringExtra("profile") ?: "General"
         startForegroundNotification()
-        if (!running) scope.launch { startEngine() }
+        if (!isRunning) {
+            scope.launch { startEngine() }
+        }
         return START_STICKY
     }
 
     private suspend fun startEngine() {
-        if (running) return
+        if (isRunning) return
 
+        var config: File? = null
         try {
             val args = mutableListOf("-i", "127.0.0.1", "-p", PROXY_PORT.toString())
             args += profiles[profile] ?: profiles.getValue("General")
+            Log.i(TAG, "Starting ByeDPI profile=$profile args=$args")
 
-            // Local ByeDPI SOCKS5 listener.
             ByeDpi.start(ByeDpiConfig(args))
+            Log.i(TAG, "ByeDPI is listening on 127.0.0.1:$PROXY_PORT")
 
             val builder = Builder()
                 .setSession("Flowesal")
                 .setMtu(8500)
                 .addAddress("10.10.10.10", 32)
                 .addRoute("0.0.0.0", 0)
+                // Capture IPv6 too; otherwise IPv6 traffic can bypass the TUN.
+                .addAddress("fd00::1", 128)
+                .addRoute("::", 0)
                 .addDnsServer("1.1.1.1")
-                // The proxy/tunnel sockets must stay outside the VPN to avoid a loop.
+                // Keep the app's own proxy/tunnel sockets outside the VPN.
                 .addDisallowedApplication(packageName)
 
             if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
@@ -78,43 +91,52 @@ class FlowesalVpnService : VpnService() {
             val fd = builder.establish()
                 ?: throw IllegalStateException("VPN establish() returned null")
             iface = fd
+            Log.i(TAG, "VPN interface established fd=${fd.fd}")
 
-            val config = File.createTempFile("flowesal-tun", ".yml", cacheDir)
+            config = File.createTempFile("flowesal-tun-", ".yml", cacheDir)
             config.writeText(
                 """
                 misc:
                   task-stack-size: 81920
+                  log-file: ${File(cacheDir, "hev-socks5-tunnel.log").absolutePath}
+                  log-level: info
                 socks5:
                   mtu: 8500
                   address: 127.0.0.1
                   port: $PROXY_PORT
-                  udp: udp
+                  udp: 'udp'
                 """.trimIndent()
             )
 
-            if (!TProxyService.TProxyStartService(config.absolutePath, fd.fd)) {
-                fd.close()
-                iface = null
-                ByeDpi.stop()
-                throw IllegalStateException("hev-socks5-tunnel failed to start")
+            val started = TProxyService.TProxyStartService(config.absolutePath, fd.fd)
+            if (!started) {
+                throw IllegalStateException("hev-socks5-tunnel rejected the start request")
+            }
+            if (!TProxyService.TProxyIsRunning()) {
+                throw IllegalStateException("hev-socks5-tunnel is not running")
             }
 
-            running = true
+            isRunning = true
             updateNotification("Flowesal включен • $profile")
-        } catch (e: Exception) {
-            running = false
+            Log.i(TAG, "Flowesal VPN is running")
+        } catch (e: Throwable) {
+            isRunning = false
+            Log.e(TAG, "VPN start failed", e)
+            runCatching { TProxyService.TProxyStopService() }
             iface?.close()
             iface = null
-            runCatching { TProxyService.TProxyStopService() }
             runCatching { ByeDpi.stop() }
-            updateNotification("Ошибка запуска: ${e.javaClass.simpleName}")
+            updateNotification("Ошибка запуска: ${e.message ?: e.javaClass.simpleName}")
             stopSelf()
+        } finally {
+            runCatching { config?.delete() }
         }
     }
 
     private fun stopEngine() {
+        Log.i(TAG, "Stopping Flowesal VPN")
+        isRunning = false
         runBlocking(Dispatchers.IO) {
-            running = false
             runCatching { TProxyService.TProxyStopService() }
             runCatching { ByeDpi.stop() }
             iface?.close()
@@ -132,7 +154,7 @@ class FlowesalVpnService : VpnService() {
                     "Flowesal VPN",
                     NotificationManager.IMPORTANCE_LOW
                 ).apply {
-                    description = "Rootless Flowesal DPI bypass"
+                    description = "Flowesal DPI bypass tunnel"
                 }
             )
         }
@@ -158,7 +180,7 @@ class FlowesalVpnService : VpnService() {
             builder
                 .setSmallIcon(android.R.drawable.stat_sys_warning)
                 .setContentTitle("Flowesal")
-                .setContentText("Запуск rootless DPI bypass…")
+                .setContentText("Запуск туннеля…")
                 .setOngoing(true)
                 .setContentIntent(openIntent)
                 .setCategory(Notification.CATEGORY_SERVICE)
@@ -178,7 +200,7 @@ class FlowesalVpnService : VpnService() {
             .setSmallIcon(android.R.drawable.stat_sys_warning)
             .setContentTitle("Flowesal")
             .setContentText(text)
-            .setOngoing(running)
+            .setOngoing(isRunning)
             .setContentIntent(openIntent)
             .setCategory(Notification.CATEGORY_SERVICE)
             .build()
